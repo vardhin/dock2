@@ -12,6 +12,8 @@
   let availableHosts = [];
   let selectedHost = '';
   let isConnected = false;
+  let isExecuting = false;
+  let lastRequestId = null;
 
   // Get available hosts from the network
   onMount(() => {
@@ -21,10 +23,14 @@
         availableHosts = [
           ...availableHosts.filter(h => h.hostName !== data.hostName),
           data
-        ];
+        ].sort((a, b) => b.resources.freeMemory - a.resources.freeMemory); // Sort by available memory
       } else if (data?.status === 'offline') {
         console.log('Host went offline:', hostId);
         availableHosts = availableHosts.filter(h => h.hostName !== data.hostName);
+        if (selectedHost === data.hostName) {
+          isConnected = false;
+          alert('Selected host went offline. Please choose another host.');
+        }
       }
     });
   });
@@ -45,43 +51,60 @@
     isConnected = true;
   }
 
-  function executeCode() {
+  async function executeCode() {
     if (!isConnected) {
       alert('Please connect to a host first');
       return;
     }
 
+    if (isExecuting) {
+      alert('Please wait for the current execution to complete');
+      return;
+    }
+
+    if (!code.trim()) {
+      alert('Please enter some code to execute');
+      return;
+    }
+
+    isExecuting = true;
     const requestId = Gun.text.random();
+    lastRequestId = requestId;
+    
     const codeRequests = gun.get(`codeRequests_${selectedHost}_${clientId}`);
-    
-    console.log('Executing code with requestId:', requestId);
-    console.log('Code to execute:', code);
-    
-    // Clear previous output
     output = 'Executing...';
     
-    // Send the request
-    codeRequests.get(requestId).put({ 
-      code,
-      timestamp: Date.now(),
-      processed: false  // Add this flag
-    });
-    console.log('Code request sent to Gun DB');
-    
-    // Listen for response
-    codeRequests.get(requestId).on((data) => {
-      console.log('Received data from Gun:', data);
-      if (data?.processed) {  // Only handle processed results
-        if (data.output !== undefined) {
-          console.log('Received output:', data.output);
-          output = data.output;
+    try {
+      codeRequests.get(requestId).put({ 
+        code,
+        timestamp: Date.now(),
+        processed: false
+      });
+
+      // Add timeout
+      const timeout = setTimeout(() => {
+        if (isExecuting && lastRequestId === requestId) {
+          isExecuting = false;
+          output = 'Execution timed out after 30 seconds';
         }
-        if (data.error) {
-          console.log('Received error:', data.error);
-          output = `Error: ${data.error}`;
+      }, 30000);
+
+      codeRequests.get(requestId).on((data) => {
+        if (data?.processed && lastRequestId === requestId) {
+          clearTimeout(timeout);
+          isExecuting = false;
+          if (data.output !== undefined) {
+            output = data.output;
+          }
+          if (data.error) {
+            output = `Error: ${data.error}`;
+          }
         }
-      }
-    });
+      });
+    } catch (error) {
+      isExecuting = false;
+      output = `Error: ${error.message}`;
+    }
   }
 </script>
 
@@ -114,8 +137,14 @@
         placeholder="Enter Python code here" 
         bind:value={code}
         rows="10"
+        disabled={isExecuting}
       ></textarea>
-      <button on:click={executeCode}>Execute</button>
+      <button 
+        on:click={executeCode} 
+        disabled={isExecuting}
+      >
+        {isExecuting ? 'Executing...' : 'Execute'}
+      </button>
       <div class="output">
         <h4>Output:</h4>
         <pre>{output}</pre>
@@ -153,5 +182,15 @@
   button {
     padding: 8px 16px;
     margin: 10px 0;
+  }
+
+  button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  textarea:disabled {
+    background-color: #f5f5f5;
+    cursor: not-allowed;
   }
 </style>

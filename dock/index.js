@@ -47,6 +47,10 @@ setInterval(() => {
   });
 }, 30000); // Update every 30 seconds
 
+// Add error timeout and cleanup
+const EXECUTION_TIMEOUT = 30000; // 30 seconds timeout
+const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
+
 // Listen for new client connections
 network.map().on((data, id) => {
   console.log('Network event received:', { data, id });  // Debug log
@@ -72,9 +76,9 @@ network.map().on((data, id) => {
 
       // Process the code request
       (async () => {
+        let containerRef;
         try {
-          console.log('Creating Docker container...');
-          const container = await docker.createContainer({
+          containerRef = await docker.createContainer({
             Image: 'python:alpine',
             Cmd: ['python', '-c', requestData.code],
             HostConfig: {
@@ -83,12 +87,28 @@ network.map().on((data, id) => {
               MemorySwap: Math.floor(resources.freeMemory * 0.1),
               CpuQuota: 100000,
               CpuPeriod: 100000,
+              NetworkMode: 'none' // Disable network access for security
             }
           });
 
+          // Set execution timeout
+          const timeoutId = setTimeout(async () => {
+            try {
+              await containerRef.stop();
+              gun.get(requestPath).get(requestId).put({
+                code: requestData.code,
+                error: 'Execution timed out after 30 seconds',
+                processed: true,
+                timestamp: Date.now()
+              });
+            } catch (err) {
+              console.error('Error stopping container:', err);
+            }
+          }, EXECUTION_TIMEOUT);
+
           console.log('Starting container...');
-          await container.start();
-          const stream = await container.logs({ follow: true, stdout: true, stderr: true });
+          await containerRef.start();
+          const stream = await containerRef.logs({ follow: true, stdout: true, stderr: true });
 
           let output = '';
           stream.on('data', chunk => {
@@ -96,6 +116,7 @@ network.map().on((data, id) => {
           });
 
           stream.on('end', () => {
+            clearTimeout(timeoutId);
             console.log('Container execution completed. Output:', output);
             // Update the specific request with the result
             gun.get(requestPath).get(requestId).put({
@@ -128,6 +149,26 @@ network.map().on((data, id) => {
     });
   }
 });
+
+// Add cleanup for old requests
+setInterval(async () => {
+  try {
+    const containers = await docker.listContainers();
+    const now = Date.now();
+    containers.forEach(async (container) => {
+      if (now - container.Created * 1000 > EXECUTION_TIMEOUT) {
+        try {
+          const containerRef = docker.getContainer(container.Id);
+          await containerRef.stop();
+        } catch (err) {
+          console.error('Error cleaning up container:', err);
+        }
+      }
+    });
+  } catch (err) {
+    console.error('Error during cleanup:', err);
+  }
+}, CLEANUP_INTERVAL);
 
 // Cleanup on process exit
 process.on('SIGINT', () => {
