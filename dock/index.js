@@ -8,9 +8,6 @@ console.log('Initializing server...');
 const app = express();
 const docker = new Docker();
 const gun = Gun({
-  web: app.listen(3000, () => {
-    console.log('Express server listening on port 3000');
-  }),
   peers: ['https://gun-manhattan.herokuapp.com/gun']
 });
 
